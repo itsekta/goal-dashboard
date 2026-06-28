@@ -16,20 +16,60 @@ ANCHOR_DATE = date(2026, 6, 4)
 
 
 def build_date_labels(header_row):
-    """Dynamically derive date label and working-day columns from the header row.
-    Skips weekends and the label column (col 0). Any new columns added to the
-    spreadsheet are automatically picked up on the next reload."""
-    date_labels = {}
-    work_cols   = []
+    """Dynamically derive date labels from the header row.
+    Uses the header's day-of-week text to snap each column to the correct date,
+    so it handles weeks where Sat/Sun columns are absent. Any new columns added
+    to the spreadsheet are automatically picked up on the next reload."""
+    # Each entry: (list_of_substrings_to_match, day_of_week_int)
+    # Thursday checks both 'thu' and 'thru' to handle "Thrusday" typos
+    DOW = [
+        (['mon'],        0),
+        (['tue'],        1),
+        (['wed'],        2),
+        (['thu', 'thru'], 3),
+        (['fri'],        4),
+        (['sat'],        5),
+        (['sun'],        6),
+    ]
+
+    # Build (col_index, day_of_week) list for all non-label columns
+    col_dows = []
     for ci, val in enumerate(header_row):
         if ci == 0 or not val:
             continue
-        s = str(val).lower().strip()
-        if "sat" in s or "sun" in s:
-            continue
-        col_date = ANCHOR_DATE + timedelta(days=ci - ANCHOR_COL)
-        date_labels[ci] = f"{col_date.strftime('%a')} {col_date.strftime('%b')} {col_date.day}"
-        work_cols.append(ci)
+        s = str(val).lower()
+        for keys, d in DOW:
+            if any(k in s for k in keys):
+                col_dows.append((ci, d))
+                break
+
+    anchor_idx = next((i for i, (ci, _) in enumerate(col_dows) if ci == ANCHOR_COL), None)
+    if anchor_idx is None:
+        return {}, []
+
+    date_labels = {}
+    work_cols   = []
+
+    # Walk forward from anchor — advance current date until day-of-week matches header
+    cur = ANCHOR_DATE
+    for ci, dow in col_dows[anchor_idx:]:
+        while cur.weekday() != dow:
+            cur += timedelta(days=1)
+        if dow < 5:  # Mon–Fri only
+            date_labels[ci] = f"{cur.strftime('%a')} {cur.strftime('%b')} {cur.day}"
+            work_cols.append(ci)
+        cur += timedelta(days=1)
+
+    # Walk backward from anchor
+    cur = ANCHOR_DATE - timedelta(days=1)
+    for ci, dow in reversed(col_dows[:anchor_idx]):
+        while cur.weekday() != dow:
+            cur -= timedelta(days=1)
+        if dow < 5:
+            date_labels[ci] = f"{cur.strftime('%a')} {cur.strftime('%b')} {cur.day}"
+            work_cols.append(ci)
+        cur -= timedelta(days=1)
+
     return date_labels, sorted(work_cols)
 
 # In-memory state
