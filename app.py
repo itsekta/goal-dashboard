@@ -3,23 +3,34 @@ import openpyxl
 import hashlib
 import re
 import os
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 app = Flask(__name__)
 
 EXCEL_FILE = "/Users/ektachaudhary/Downloads/Goal_progress_June.xlsx"
 MIN_TICKETS = 6
 
-DATE_LABELS = {
-    1: "Mon Jun 1",  2: "Tue Jun 2",  3: "Wed Jun 3",
-    4: "Thu Jun 4",  5: "Fri Jun 5",
-    8: "Mon Jun 9",  9: "Tue Jun 10", 10: "Wed Jun 11",
-    11: "Thu Jun 12", 12: "Fri Jun 13",
-    13: "Mon Jun 16", 14: "Tue Jun 17", 15: "Wed Jun 18",
-    16: "Thu Jun 19", 17: "Fri Jun 20",
-    18: "Mon Jun 23", 19: "Tue Jun 24",
-}
-WORK_COLS = sorted(DATE_LABELS.keys())
+# Anchor: col 4 in the header row = "Thurs - 4th" = June 4, 2026
+ANCHOR_COL  = 4
+ANCHOR_DATE = date(2026, 6, 4)
+
+
+def build_date_labels(header_row):
+    """Dynamically derive date label and working-day columns from the header row.
+    Skips weekends and the label column (col 0). Any new columns added to the
+    spreadsheet are automatically picked up on the next reload."""
+    date_labels = {}
+    work_cols   = []
+    for ci, val in enumerate(header_row):
+        if ci == 0 or not val:
+            continue
+        s = str(val).lower().strip()
+        if "sat" in s or "sun" in s:
+            continue
+        col_date = ANCHOR_DATE + timedelta(days=ci - ANCHOR_COL)
+        date_labels[ci] = f"{col_date.strftime('%a')} {col_date.strftime('%b')} {col_date.day}"
+        work_cols.append(ci)
+    return date_labels, sorted(work_cols)
 
 # In-memory state
 _state = {"hash": None, "rows": None, "changed_cells": set(), "change_log": []}
@@ -70,12 +81,13 @@ def get_data():
         new_rows = load_rows(EXCEL_FILE)
         new_changed = detect_changes(_state["rows"], new_rows)
 
+        # Build dynamic labels from the new header row
+        new_labels, _ = build_date_labels(new_rows[0])
         for (ri, ci) in new_changed:
             old_v = _state["rows"][ri][ci] if _state["rows"] and ri < len(_state["rows"]) and ci < len(_state["rows"][ri]) else None
             new_v = new_rows[ri][ci] if ri < len(new_rows) and ci < len(new_rows[ri]) else None
-            date = DATE_LABELS.get(ci, f"col {ci}")
             _state["change_log"].insert(0, {
-                "date": date, "row": ri, "col": ci,
+                "date": new_labels.get(ci, f"col {ci}"), "row": ri, "col": ci,
                 "from": str(old_v) if old_v is not None else "—",
                 "to": str(new_v)[:60] if new_v is not None else "—",
             })
@@ -87,55 +99,58 @@ def get_data():
     rows = _state["rows"]
     changed = _state["changed_cells"]
 
+    # Always rebuild from the current header so new columns are picked up live
+    date_labels, work_cols = build_date_labels(rows[0])
+
     def safe(idx):
         return rows[idx] if rows and idx < len(rows) else []
 
-    r1 = safe(1)   # Goal 1 tickets
-    r4 = safe(4)   # Goal 2 engagement
-    r6 = safe(6)   # Goal 2 responsiveness
-    r9 = safe(9)   # Goal 3 RTO
-    r12 = safe(12) # Goal 4 growth
-    r14 = safe(14) # Others
+    r1  = safe(1)   # Goal 1 tickets
+    r4  = safe(4)   # Goal 2 engagement
+    r6  = safe(6)   # Goal 2 responsiveness
+    r9  = safe(9)   # Goal 3 RTO
+    r12 = safe(12)  # Goal 4 growth
+    r14 = safe(14)  # Others
 
     def cell(row, ci):
         return row[ci] if ci < len(row) else None
 
     # Goal 1
     goal1 = []
-    for ci in WORK_COLS:
+    for ci in work_cols:
         cnt, tix = count_tickets(cell(r1, ci))
         goal1.append({
-            "date": DATE_LABELS[ci], "count": cnt,
+            "date": date_labels[ci], "count": cnt,
             "tickets": tix, "is_leave": cnt == -1,
             "changed": (1, ci) in changed,
         })
 
     # Goal 2
     engagement, responsiveness = [], []
-    for ci in WORK_COLS:
-        engagement.append({"date": DATE_LABELS[ci], "done": is_done(cell(r4, ci)), "changed": (4, ci) in changed})
-        responsiveness.append({"date": DATE_LABELS[ci], "done": is_done(cell(r6, ci)), "changed": (6, ci) in changed})
+    for ci in work_cols:
+        engagement.append({"date": date_labels[ci], "done": is_done(cell(r4, ci)), "changed": (4, ci) in changed})
+        responsiveness.append({"date": date_labels[ci], "done": is_done(cell(r6, ci)), "changed": (6, ci) in changed})
 
     # Goal 3
     rto = []
-    for ci in WORK_COLS:
-        rto.append({"date": DATE_LABELS[ci], "done": is_done(cell(r9, ci)), "changed": (9, ci) in changed})
+    for ci in work_cols:
+        rto.append({"date": date_labels[ci], "done": is_done(cell(r9, ci)), "changed": (9, ci) in changed})
 
     # Goal 4
     growth = []
-    for ci in WORK_COLS:
+    for ci in work_cols:
         val = cell(r12, ci)
         if val and str(val).strip():
             tools = [t.strip() for t in str(val).split("\n") if t.strip()]
-            growth.append({"date": DATE_LABELS[ci], "tools": tools, "changed": (12, ci) in changed})
+            growth.append({"date": date_labels[ci], "tools": tools, "changed": (12, ci) in changed})
 
     # Others
     others = []
-    for ci in WORK_COLS:
+    for ci in work_cols:
         val = cell(r14, ci)
         if val and str(val).strip():
             acts = [a.strip() for a in str(val).split("\n") if a.strip()]
-            others.append({"date": DATE_LABELS[ci], "activities": acts, "changed": (14, ci) in changed})
+            others.append({"date": date_labels[ci], "activities": acts, "changed": (14, ci) in changed})
 
     # Stats
     tracked = [d for d in goal1 if d["count"] != 0]
@@ -157,7 +172,7 @@ def get_data():
             "goal2_respond": sum(1 for d in responsiveness if d["done"]),
             "goal3_rto": sum(1 for d in rto if d["done"]),
             "goal4_training": len(growth),
-            "total_days": len(WORK_COLS),
+            "total_days": len(work_cols),
         },
         "goal1": goal1,
         "goal2": {"engagement": engagement, "responsiveness": responsiveness},
